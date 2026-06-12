@@ -6,6 +6,13 @@ const pool = require('../config/database');
  *   - Marcador exacto al medio tiempo → 7 puntos
  *   - Tendencia correcta (local/empate/visitante) → 3 puntos
  *   - Sin acierto → 0 puntos
+ *
+ * RENDIMIENTO v2.1: antes se ejecutaban 2 queries POR predicción (N+1).
+ * Ahora todo se resuelve en UNA sola sentencia set-based con CTE:
+ * se puntúan las predicciones pendientes y, con esas mismas filas
+ * (RETURNING), se acumulan los puntos por usuario. Es atómico e
+ * idempotente: si se vuelve a llamar, no hay filas pendientes y no
+ * se duplica ningún punto.
  */
 async function calcularYRepartirPuntos(partidoId) {
   const { rows } = await pool.query(
@@ -20,35 +27,35 @@ async function calcularYRepartirPuntos(partidoId) {
 
   const tendenciaReal = gl > gv ? 'local' : gl < gv ? 'visitante' : 'empate';
 
-  const { rows: predicciones } = await pool.query(
-    'SELECT id, usuario_id, goles_local_esperados_mt, goles_visitante_esperados_mt, tendencia_apostada FROM predicciones WHERE partido_id = $1 AND puntos_obtenidos IS NULL',
-    [partidoId]
+  const { rows: acreditados } = await pool.query(
+    `WITH puntuadas AS (
+       UPDATE predicciones
+       SET puntos_obtenidos = CASE
+         WHEN goles_local_esperados_mt = $2 AND goles_visitante_esperados_mt = $3 THEN 7
+         WHEN tendencia_apostada = $4 THEN 3
+         ELSE 0
+       END
+       WHERE partido_id = $1 AND puntos_obtenidos IS NULL
+       RETURNING usuario_id, puntos_obtenidos
+     ),
+     agregado AS (
+       SELECT usuario_id,
+              SUM(puntos_obtenidos)                        AS pts,
+              COUNT(*) FILTER (WHERE puntos_obtenidos = 7) AS exactos
+       FROM puntuadas
+       GROUP BY usuario_id
+       HAVING SUM(puntos_obtenidos) > 0
+     )
+     UPDATE usuarios u
+     SET puntos_totales   = u.puntos_totales   + a.pts,
+         aciertos_exactos = u.aciertos_exactos + a.exactos
+     FROM agregado a
+     WHERE u.id = a.usuario_id
+     RETURNING u.id`,
+    [partidoId, gl, gv, tendenciaReal]
   );
 
-  for (const pred of predicciones) {
-    let puntos = 0;
-    const esExacto = pred.goles_local_esperados_mt === gl && pred.goles_visitante_esperados_mt === gv;
-    const esTendencia = pred.tendencia_apostada === tendenciaReal;
-
-    if (esExacto)      puntos = 7;
-    else if (esTendencia) puntos = 3;
-
-    await pool.query(
-      'UPDATE predicciones SET puntos_obtenidos = $1 WHERE id = $2',
-      [puntos, pred.id]
-    );
-
-    // Acumular en el perfil del usuario
-    if (puntos > 0) {
-      const aciertosExactos = esExacto ? 1 : 0;
-      await pool.query(
-        'UPDATE usuarios SET puntos_totales = puntos_totales + $1, aciertos_exactos = aciertos_exactos + $2 WHERE id = $3',
-        [puntos, aciertosExactos, pred.usuario_id]
-      );
-    }
-  }
-
-  console.log(`[Scoring] Puntos repartidos para partido ${partidoId} (${predicciones.length} predicciones)`);
+  console.log(`[Scoring] Partido ${partidoId}: puntos acreditados a ${acreditados.length} usuario(s) en 1 query`);
 }
 
 module.exports = { calcularYRepartirPuntos };

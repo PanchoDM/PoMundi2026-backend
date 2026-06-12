@@ -10,6 +10,16 @@ async function register(req, res) {
   if (!nombre_usuario.trim().toLowerCase().endsWith('@pollamundial2026.com'))
     return res.status(403).json({ message: 'ingrese la credencial correcta' });
 
+  // SEGURIDAD: política de contraseña fuerte (mín. 8 caracteres, letras y números)
+  if (typeof password !== 'string' || password.length < 8 || password.length > 72 ||
+      !/[a-zA-Z]/.test(password) || !/\d/.test(password))
+    return res.status(400).json({
+      message: 'La contraseña debe tener al menos 8 caracteres e incluir letras y números',
+    });
+
+  if (nombre_usuario.trim().length > 50)
+    return res.status(400).json({ message: 'El nombre de usuario es demasiado largo' });
+
   try {
     const hash = await bcrypt.hash(password, 12);
     // Para PostgreSQL usamos $1, $2. Y quitamos el ID manual porque Supabase lo pone solo (int4)

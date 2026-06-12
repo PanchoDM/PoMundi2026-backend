@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS partidos (
   estado             VARCHAR(20)  NOT NULL DEFAULT 'pendiente' CHECK (estado IN ('pendiente','medio_tiempo','finalizado')),
   apuestas_abiertas  BOOLEAN      NOT NULL DEFAULT TRUE,
   visible_usuarios   BOOLEAN      NOT NULL DEFAULT TRUE,
+  ronda              VARCHAR(20)  NULL,
+  penales_habilitados BOOLEAN     NOT NULL DEFAULT FALSE,
+  penales_local      SMALLINT     NULL DEFAULT NULL,
+  penales_visitante  SMALLINT     NULL DEFAULT NULL,
   updated_at         TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -43,3 +47,11 @@ CREATE TABLE IF NOT EXISTS predicciones (
   FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
   FOREIGN KEY (partido_id) REFERENCES partidos(id) ON DELETE CASCADE
 );
+
+-- ÍNDICES DE RENDIMIENTO (v2.1) — ver database/migration_v2_1.sql para BD existentes
+CREATE INDEX IF NOT EXISTS idx_partidos_fecha          ON partidos (fecha_partido);
+CREATE INDEX IF NOT EXISTS idx_partidos_visibles_fecha ON partidos (fecha_partido) WHERE visible_usuarios = TRUE;
+CREATE INDEX IF NOT EXISTS idx_partidos_abiertos       ON partidos (fecha_partido) WHERE apuestas_abiertas = TRUE;
+CREATE INDEX IF NOT EXISTS idx_predicciones_partido    ON predicciones (partido_id);
+CREATE INDEX IF NOT EXISTS idx_predicciones_usuario    ON predicciones (usuario_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_usuarios_ranking        ON usuarios (puntos_totales DESC, aciertos_exactos DESC) WHERE rol = 'user';
