@@ -1,5 +1,6 @@
 const pool          = require('../config/database');
 const { getStreak } = require('../services/streakService');
+const { apuestasVencidas } = require('../utils/limaTime');
 
 async function crear(req, res) {
   const { partido_id, goles_local_esperados_mt, goles_visitante_esperados_mt } = req.body;
@@ -11,13 +12,15 @@ async function crear(req, res) {
   try {
     // PostgreSQL: Extraemos { rows } y usamos $1
     const { rows: partidos } = await pool.query(
-      'SELECT apuestas_abiertas, estado FROM partidos WHERE id = $1', [partido_id]
+      'SELECT apuestas_abiertas, estado, fecha_partido FROM partidos WHERE id = $1', [partido_id]
     );
-    
+
     if (partidos.length === 0) return res.status(404).json({ message: 'Partido no encontrado' });
-    
+
     const partido = partidos[0];
-    if (!partido.apuestas_abiertas || partido.estado === 'finalizado')
+    // Las apuestas cierran 5 minutos después de la hora oficial de inicio,
+    // sin importar si el cron de cierre automático ya alcanzó a marcar el flag.
+    if (!partido.apuestas_abiertas || partido.estado === 'finalizado' || apuestasVencidas(partido.fecha_partido))
       return res.status(403).json({ message: 'Las apuestas para este partido están cerradas' });
 
     const gl = Number(goles_local_esperados_mt);
