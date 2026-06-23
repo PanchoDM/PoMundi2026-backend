@@ -1,4 +1,4 @@
-const pool     = require('../config/database');
+const pool = require('../config/database');
 const { broadcast } = require('../services/sseService');
 const { calcularYRepartirPuntos } = require('../services/scoringService');
 const { golesValidos } = require('../middleware/security');
@@ -40,32 +40,50 @@ async function getById(req, res) {
 
 // FUNCIONALIDAD ADMIN: crear nuevo partido
 async function crear(req, res) {
-  const { equipo_local, equipo_visitante, fecha_partido, grupo, jornada } = req.body;
+  const { equipo_local, equipo_visitante, fecha_partido, grupo, jornada, ronda } = req.body;
+  
   if (!equipo_local?.trim() || !equipo_visitante?.trim() || !fecha_partido)
     return res.status(400).json({ message: 'equipo_local, equipo_visitante y fecha_partido son requeridos' });
+  
+  if (!grupo && !ronda)
+    return res.status(400).json({ message: 'Se debe especificar un grupo o una ronda' });
+  
+  if (grupo && ronda)
+    return res.status(400).json({ message: 'Un partido no puede pertenecer a un grupo y una ronda simultáneamente' });
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO partidos (equipo_local, equipo_visitante, fecha_partido, grupo, jornada)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [equipo_local.trim(), equipo_visitante.trim(), fecha_partido,
-       grupo?.toUpperCase() || null, jornada ? +jornada : null]
+      `INSERT INTO partidos (equipo_local, equipo_visitante, fecha_partido, grupo, jornada, ronda)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [
+        equipo_local.trim(), 
+        equipo_visitante.trim(), 
+        fecha_partido,
+        grupo ? String(grupo).toUpperCase() : null,
+        jornada ? +jornada : null,
+        ronda ? String(ronda) : null
+      ]
     );
+
     const newPartido = {
-      id:              rows[0].id,
-      equipo_local:    equipo_local.trim(),
-      equipo_visitante: equipo_visitante.trim(),
+      id:                rows[0].id,
+      equipo_local:      equipo_local.trim(),
+      equipo_visitante:  equipo_visitante.trim(),
       fecha_partido,
-      grupo:           grupo?.toUpperCase() || null,
-      jornada:         jornada ? +jornada : null,
-      estado:          'pendiente',
+      grupo:             grupo ? String(grupo).toUpperCase() : null,
+      jornada:           jornada ? +jornada : null,
+      ronda:             ronda ? String(ronda) : null,
+      estado:            'pendiente',
       apuestas_abiertas: true,
+      visible_usuarios:  true // Por defecto se crea visible
     };
+
     // Notificar a todos los usuarios conectados que hay una nueva apuesta disponible
     broadcast('bet-opened', {
       partido_id: newPartido.id,
       match_name: `${newPartido.equipo_local} vs ${newPartido.equipo_visitante}`,
     });
+
     res.status(201).json(newPartido);
   } catch (error) {
     console.error('Error en crear:', error);
@@ -84,18 +102,15 @@ async function toggleApuestas(req, res) {
 
     const partido = rows[0];
     const nuevoEstado = !partido.apuestas_abiertas;
-
     await pool.query(
       'UPDATE partidos SET apuestas_abiertas = $1 WHERE id = $2',
       [nuevoEstado, req.params.id]
     );
-
     const matchName = `${partido.equipo_local} vs ${partido.equipo_visitante}`;
     broadcast(nuevoEstado ? 'bet-opened' : 'bet-closed', {
       partido_id: partido.id,
       match_name: matchName,
     });
-
     res.json({ id: req.params.id, apuestas_abiertas: nuevoEstado });
   } catch (error) {
     res.status(500).json({ message: 'Error al actualizar partido' });
@@ -109,21 +124,23 @@ async function actualizarResultado(req, res) {
 
   if (goles_local_mt === undefined || goles_visitante_mt === undefined || !estado)
     return res.status(400).json({ message: 'goles_local_mt, goles_visitante_mt y estado son requeridos' });
+  
   if (!estadosValidos.includes(estado))
     return res.status(400).json({ message: 'Estado inválido' });
+  
   // SEGURIDAD: validar que los goles sean enteros entre 0 y 20
   if (!golesValidos(goles_local_mt, goles_visitante_mt))
     return res.status(400).json({ message: 'Los goles deben ser enteros entre 0 y 20' });
-
+  
   try {
     const { rows } = await pool.query(
       'SELECT id, equipo_local, equipo_visitante, estado AS "estadoActual" FROM partidos WHERE id = $1',
       [req.params.id]
     );
+    
     if (rows.length === 0) return res.status(404).json({ message: 'Partido no encontrado' });
 
     const partido = rows[0];
-
     // LOCK: solo se bloquea cuando el partido ya está finalizado
     if (partido.estadoActual === 'finalizado') {
       return res.status(400).json({
@@ -144,7 +161,7 @@ async function actualizarResultado(req, res) {
         req.params.id,
       ]
     );
-
+    
     // Repartir puntos cuando se registra el marcador de medio tiempo o finalizado
     if (estado === 'medio_tiempo' || estado === 'finalizado') {
       await calcularYRepartirPuntos(partido.id);
@@ -158,7 +175,6 @@ async function actualizarResultado(req, res) {
       goles_visitante_mt: Number(goles_visitante_mt),
       estado,
     });
-
     res.json({ message: 'Resultado actualizado', partido_id: partido.id, estado });
   } catch (error) {
     console.error('[actualizarResultado]', error.message);
@@ -176,7 +192,6 @@ async function eliminar(req, res) {
     if (rows.length === 0) return res.status(404).json({ message: 'Partido no encontrado' });
 
     const partido = rows[0];
-
     if (partido.estado !== 'pendiente') {
       return res.status(400).json({
         message: `No se puede eliminar: el partido ya tiene resultado registrado (${partido.estado}).`,
@@ -205,7 +220,6 @@ async function toggleVisibilidad(req, res) {
 
     const partido = rows[0];
     const nuevoEstado = !partido.visible_usuarios;
-
     await pool.query(
       'UPDATE partidos SET visible_usuarios = $1 WHERE id = $2',
       [nuevoEstado, req.params.id]
@@ -222,9 +236,10 @@ async function marcadorEnVivo(req, res) {
   const { goles_local_mt, goles_visitante_mt } = req.body;
   if (goles_local_mt === undefined || goles_visitante_mt === undefined)
     return res.status(400).json({ message: 'goles_local_mt y goles_visitante_mt son requeridos' });
+  
   if (!golesValidos(goles_local_mt, goles_visitante_mt))
     return res.status(400).json({ message: 'Los goles deben ser enteros entre 0 y 20' });
-
+  
   try {
     const { rows } = await pool.query(
       'SELECT id, equipo_local, equipo_visitante, estado FROM partidos WHERE id = $1',
@@ -235,7 +250,7 @@ async function marcadorEnVivo(req, res) {
     const partido = rows[0];
     if (partido.estado === 'finalizado')
       return res.status(400).json({ message: 'El partido ya está finalizado y no puede modificarse' });
-
+    
     // Si el partido aún no había arrancado, la primera actualización de marcador
     // en vivo lo pasa a estado 'medio_tiempo' (en curso)
     const nuevoEstado = partido.estado === 'pendiente' ? 'medio_tiempo' : partido.estado;
@@ -244,7 +259,6 @@ async function marcadorEnVivo(req, res) {
       'UPDATE partidos SET goles_local_mt = $1, goles_visitante_mt = $2, estado = $3 WHERE id = $4',
       [Number(goles_local_mt), Number(goles_visitante_mt), nuevoEstado, req.params.id]
     );
-
     broadcast('score-updated', {
       partido_id:         partido.id,
       match_name:         `${partido.equipo_local} vs ${partido.equipo_visitante}`,
@@ -252,7 +266,6 @@ async function marcadorEnVivo(req, res) {
       goles_visitante_mt: Number(goles_visitante_mt),
       estado:             nuevoEstado,
     });
-
     res.json({ message: 'Marcador en vivo actualizado', partido_id: +req.params.id });
   } catch (error) {
     console.error('[marcadorEnVivo]', error.message);
@@ -265,9 +278,10 @@ async function visibilidadFase(req, res) {
   const { tipo, valor, visible } = req.body;
   if (!['grupo', 'ronda'].includes(tipo) || !valor || typeof visible !== 'boolean')
     return res.status(400).json({ message: 'tipo (grupo|ronda), valor y visible (boolean) son requeridos' });
-
+  
   const col = tipo === 'grupo' ? 'grupo' : 'ronda';
   const valorNorm = tipo === 'grupo' ? String(valor).toUpperCase() : valor;
+  
   try {
     const { rows } = await pool.query(
       `UPDATE partidos SET visible_usuarios = $1 WHERE ${col} = $2 RETURNING id`,
@@ -279,7 +293,6 @@ async function visibilidadFase(req, res) {
     res.status(500).json({ message: 'Error al actualizar visibilidad de fase' });
   }
 }
-
 
 // ════════════════════════════════════════════════════════════════════════════
 // NUEVO v2.1 — Penales, estadísticas y acciones masivas
@@ -296,7 +309,7 @@ async function togglePenales(req, res) {
 
     const partido = rows[0];
     const nuevoEstado = !partido.penales_habilitados;
-
+    
     await pool.query(
       `UPDATE partidos
        SET penales_habilitados = $1,
@@ -305,7 +318,6 @@ async function togglePenales(req, res) {
        WHERE id = $2`,
       [nuevoEstado, req.params.id]
     );
-
     broadcast('penales-updated', {
       partido_id:          partido.id,
       match_name:          `${partido.equipo_local} vs ${partido.equipo_visitante}`,
@@ -313,7 +325,6 @@ async function togglePenales(req, res) {
       penales_local:       nuevoEstado ? 0 : null,
       penales_visitante:   nuevoEstado ? 0 : null,
     });
-
     res.json({ id: +req.params.id, penales_habilitados: nuevoEstado });
   } catch (error) {
     console.error('[togglePenales]', error.message);
@@ -326,9 +337,10 @@ async function actualizarPenales(req, res) {
   const { penales_local, penales_visitante } = req.body;
   if (penales_local === undefined || penales_visitante === undefined)
     return res.status(400).json({ message: 'penales_local y penales_visitante son requeridos' });
+  
   if (!golesValidos(penales_local, penales_visitante))
     return res.status(400).json({ message: 'Los penales deben ser enteros entre 0 y 20' });
-
+  
   try {
     const { rows } = await pool.query(
       'SELECT id, equipo_local, equipo_visitante, penales_habilitados FROM partidos WHERE id = $1',
@@ -339,12 +351,11 @@ async function actualizarPenales(req, res) {
     const partido = rows[0];
     if (!partido.penales_habilitados)
       return res.status(400).json({ message: 'La ronda de penales no está habilitada para este partido' });
-
+    
     await pool.query(
       'UPDATE partidos SET penales_local = $1, penales_visitante = $2 WHERE id = $3',
       [Number(penales_local), Number(penales_visitante), req.params.id]
     );
-
     broadcast('penales-updated', {
       partido_id:          partido.id,
       match_name:          `${partido.equipo_local} vs ${partido.equipo_visitante}`,
@@ -352,7 +363,6 @@ async function actualizarPenales(req, res) {
       penales_local:       Number(penales_local),
       penales_visitante:   Number(penales_visitante),
     });
-
     res.json({ message: 'Marcador de penales actualizado', partido_id: +req.params.id });
   } catch (error) {
     console.error('[actualizarPenales]', error.message);
@@ -366,7 +376,7 @@ async function statsPartido(req, res) {
   try {
     const { rows } = await pool.query(
       `SELECT
-         (COUNT(*))::int                                                   AS total,
+         (COUNT(*))::int                                                  AS total,
          (COUNT(*) FILTER (WHERE tendencia_apostada = 'local'))::int      AS local,
          (COUNT(*) FILTER (WHERE tendencia_apostada = 'empate'))::int     AS empate,
          (COUNT(*) FILTER (WHERE tendencia_apostada = 'visitante'))::int  AS visitante,
@@ -378,6 +388,7 @@ async function statsPartido(req, res) {
     const s     = rows[0];
     const total = Number(s.total) || 0;
     const pct   = n => total ? Math.round((Number(n) / total) * 100) : 0;
+    
     res.json({
       partido_id:    +req.params.id,
       total,
